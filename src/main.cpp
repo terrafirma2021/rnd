@@ -1,44 +1,62 @@
 #include "Arduino.h"
+#include "esp_system.h"
+#include "rom/spi_flash.h"
+
 #define DAC_PIN 25  // DAC1 on GPIO 25
+#define RAW_AUDIO_OFFSET 0x200000
+#define MARKER_SIZE 4              // Marker is 4 bytes (0xDEADBEEF)
 
-const int lowFreq = 500;       // 500 Hz low tone
-const int highFreq = 1200;     // 1200 Hz high tone
-const float sweepTime = 0.5;   // 0.5 seconds to sweep up or down
-const int sampleRate = 5000;   // Sample rate in Hz (5 kHz)
-const int sweepSteps = sampleRate * sweepTime; // Number of steps in the sweep
+void playAudioFromFlash();
 
-TaskHandle_t sirenTaskHandle;
-void sirenTask(void *parameter);
-void generateTone(int frequency);
+uint8_t audioBuffer[256];
 
 void setup() {
-  xTaskCreate(sirenTask, "SirenTask", 1024, NULL, 1, NULL);
+  Serial.begin(115200);
+  Serial.println("Starting audio playback...");
+
+  playAudioFromFlash();
 }
 
 void loop() {
 
 }
 
-void sirenTask(void *parameter) {
-  while (1) {
-    for (int i = 0; i <= sweepSteps; i++) {
-      float t = (float)i / sweepSteps;
-      int freq = lowFreq + t * (highFreq - lowFreq);
-      generateTone(freq);
-      delayMicroseconds(1000000 / sampleRate);
-    }
+bool isEndMarker(uint8_t* buffer, int length) {
+  const uint8_t marker[MARKER_SIZE] = {0xDE, 0xAD, 0xBE, 0xEF};
 
-    for (int i = 0; i <= sweepSteps; i++) {
-      float t = (float)i / sweepSteps;
-      int freq = highFreq - t * (highFreq - lowFreq);
-      generateTone(freq);
-      delayMicroseconds(1000000 / sampleRate);
+  if (length >= MARKER_SIZE) {
+    for (int i = 0; i < MARKER_SIZE; i++) {
+      if (buffer[length - MARKER_SIZE + i] != marker[i]) {
+        return false;
+      }
     }
+    return true;
   }
+  return false;
 }
 
-void generateTone(int frequency) {
-  int amplitude = 255;  // Maximum DAC output (8-bit resolution)
-  int waveValue = (sin(2 * PI * esp_timer_get_time() * frequency / 1000000.0) + 1) * (amplitude / 2); 
-  dacWrite(DAC_PIN, waveValue);
+void playAudioFromFlash() {
+  int currentOffset = RAW_AUDIO_OFFSET;
+  bool markerFound = false;
+
+  while (!markerFound) {
+
+    spi_flash_read(currentOffset, audioBuffer, sizeof(audioBuffer));
+
+    markerFound = isEndMarker(audioBuffer, sizeof(audioBuffer));
+
+    if (markerFound) {
+      Serial.println("End of audio detected (marker found).");
+      break;
+    }
+
+    for (int i = 0; i < sizeof(audioBuffer); i++) {
+      dacWrite(DAC_PIN, audioBuffer[i]);
+      delayMicroseconds(62);
+    }
+
+    currentOffset += sizeof(audioBuffer);
+  }
+
+  Serial.println("Audio playback finished.");
 }
